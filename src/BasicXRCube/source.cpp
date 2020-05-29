@@ -35,8 +35,10 @@ XrViewConfigurationType app_config_view = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STE
 
 // OpenXR globals
 XrInstance xr_instance = {};
+XrSession xr_session = {};
 XrSystemId xr_system_id = XR_NULL_SYSTEM_ID;
 XrEnvironmentBlendMode xr_blend_mode;
+XrSpace xr_app_space = {};
 
 // D3D globals
 ID3D11Device* d3d_device;
@@ -44,6 +46,8 @@ ID3D11DeviceContext* d3d_device_context;
 
 PFN_xrGetD3D11GraphicsRequirementsKHR ext_xrGetD3D11GraphicsRequirementsKHR;
 
+// Constants to use
+const XrPosef xr_pose_identity = { {0, 0, 0, 1}, {0, 0, 0} }; // Struct consisting of a quaternion which describes the orientation, and a vector3f which describes the position
 
 //--------------------------------------------------------------------------------------------------------------
 // Main Function
@@ -113,6 +117,38 @@ bool InitXR() {
 		return false;
 	}
 
+	// Create a OpenXR session
+	// First we need to create a binding for the D3D11 device we just created before
+	XrGraphicsBindingD3D11KHR graphics_binding = {};
+	graphics_binding.type = XR_TYPE_GRAPHICS_BINDING_D3D11_KHR;
+	graphics_binding.device = d3d_device;
+
+	// Then we can use this graphics binding to create a create info struct to pass to the create session function
+	XrSessionCreateInfo session_create_info = {};
+	session_create_info.type = XR_TYPE_SESSION_CREATE_INFO;
+	session_create_info.next = &graphics_binding;
+	session_create_info.systemId = xr_system_id;
+
+	// Now we're ready to create the xr session
+	result = xrCreateSession(xr_instance, &session_create_info, &xr_session);
+	if (XR_FAILED(result)) {
+		return false;
+	}
+
+	// Next, we need to choose a reference space to display the content. We'll use local, as the hololens doesn't
+	// have a stage (which is usually restricted to the guardian system of the device, and more used by devices
+	// such as the oculus rift or the valve index)
+	XrReferenceSpaceCreateInfo reference_space_create_info = {};
+	reference_space_create_info.type = XR_TYPE_REFERENCE_SPACE_CREATE_INFO;
+	reference_space_create_info.poseInReferenceSpace = xr_pose_identity;
+	reference_space_create_info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+
+	// Create the reference space
+	result = xrCreateReferenceSpace(xr_session, &reference_space_create_info, &xr_app_space);
+	if (XR_FAILED(result)) {
+		return false;
+	}
+
 	return true;
 }
 
@@ -130,10 +166,14 @@ bool InitD3DDevice(LUID& adapter_luid) {
 	// Create a DXGI factory to be used for finding the correct adapter
 	CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)(&dxgi_factory));
 
+	// Loop over all adapters that the factory can return
 	int current_adapter_id = 0;
 	while (dxgi_factory->EnumAdapters1(current_adapter_id++, &adapter) == S_OK) {
 		adapter->GetDesc1(&adapter_desc);
 
+		// If the luid of the current selected adapter matches the one we're looking for,
+		// we can break from the loop and use that adapter.
+		// Else release the adapter and keep on searching
 		if (memcmp(&adapter_desc.AdapterLuid, &adapter_luid, sizeof(&adapter_luid)) == 0) {
 			break;
 		}
@@ -141,15 +181,21 @@ bool InitD3DDevice(LUID& adapter_luid) {
 			adapter->Release();
 			adapter = nullptr;
 		}
-		
 	}
+
+	// Release the factory as it's not used anymore after this point
 	dxgi_factory->Release();
+
+	// We want to use DirectX feature level 11.0
 	D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
 
+	// If we didn't find an adapter that we can use, return false, as we can't create
+	// a D3D11 device without an adapter
 	if (adapter == nullptr) {
 		return false;
 	}
-		
+	
+	// Create the D3D11 device. We don't create the swapchains here, because we'll create them later
 	HRESULT result = D3D11CreateDevice(adapter, D3D_DRIVER_TYPE_UNKNOWN, 0, 0, featureLevels, _countof(featureLevels), D3D11_SDK_VERSION, &d3d_device, nullptr, &d3d_device_context);
 
 	if (FAILED(result)) {
