@@ -279,9 +279,24 @@ bool InitXR() {
 		swapchain.swapchain_images.resize(swapchain_image_count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
 		swapchain.swapchain_data.resize(swapchain_image_count);
 
-		// Now call the xrEnumerateSwapchainImages function again,
-	}
+		// Now call the xrEnumerateSwapchainImages function again, this time with the 2nd param set to the number
+		// of swapchain images that got created by OpenXR. That way, we can store the swapchain images into our
+		// swwapchain
+		result = xrEnumerateSwapchainImages(swapchain_handle, swapchain_image_count, &swapchain_image_count, (XrSwapchainImageBaseHeader*)swapchain.swapchain_images.data());
+		if (XR_FAILED(result)) {
+			return false;
+		}
 
+		// For each swapchain image, call the function to create a render target using that swapchain image
+		for (uint32_t i = 0; i < swapchain_image_count; i++) {
+			swapchain.swapchain_data[i] = CreateSwapchainRenderTargets(swapchain.swapchain_images[i]);
+		}
+
+		// We're done creating that swapchain, we can now add it to the vector of our swapchains (as we have multiple,
+		// as mentioned before one for each view
+		xr_swapchains.push_back(swapchain);
+
+	}
 
 	return true;
 }
