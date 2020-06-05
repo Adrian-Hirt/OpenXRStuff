@@ -3,13 +3,21 @@
 //###################################################################################################################
 #pragma comment(lib,"D3D11.lib")
 #pragma comment(lib,"Dxgi.lib") // for CreateDXGIFactory1
+#pragma comment(lib,"D3dcompiler.lib") // To be able to compile the shaders
 
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
 
+// DirectX includes
 #include <d3d11.h>
+#include <d3dcompiler.h>
+#include <directxmath.h>
+
+// OpenXR includes
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+
+// Other includes
 #include <vector>
 
 
@@ -29,6 +37,15 @@ struct swapchain_t {
 	std::vector<swapchain_data_t> swapchain_data;
 };
 
+struct vertex_t {
+	float x, y, z; // Coordinates of the vertex
+	float norm_x, norm_y, norm_z; // Normal Vector
+};
+
+struct const_buffer_t {
+	DirectX::XMFLOAT4X4 world;
+	DirectX::XMFLOAT4X4 view_projection;
+};
 
 //###################################################################################################################
 // Function declarations
@@ -36,6 +53,8 @@ struct swapchain_t {
 bool InitXR();
 bool InitD3DDevice(LUID& adapter_luid);
 swapchain_data_t CreateSwapchainRenderTargets(XrSwapchainImageD3D11KHR& swapchain_image);
+bool InitD3DPipeline();
+bool InitD3DGraphics();
 
 
 //###################################################################################################################
@@ -68,6 +87,12 @@ std::vector<swapchain_t> xr_swapchains;
 ID3D11Device* d3d_device;
 ID3D11DeviceContext* d3d_device_context;
 DXGI_FORMAT d3d_swapchain_format = DXGI_FORMAT_R8G8B8A8_UNORM;
+ID3D11VertexShader* d3d_vertex_shader;
+ID3D11PixelShader* d3d_pixel_shader;
+ID3D11InputLayout* d3d_input_layout;
+ID3D11Buffer* d3d_const_buffer;
+ID3D11Buffer* d3d_vertex_buffer;
+ID3D11Buffer* d3d_index_buffer;
 
 //------------------------------------------------------------------------------------------------------
 // Constants to use
@@ -79,6 +104,35 @@ const XrPosef xr_pose_identity = { {0, 0, 0, 1}, {0, 0, 0} }; // Struct consisti
 //------------------------------------------------------------------------------------------------------
 PFN_xrGetD3D11GraphicsRequirementsKHR ext_xrGetD3D11GraphicsRequirementsKHR;
 
+//------------------------------------------------------------------------------------------------------
+// The data to draw
+//------------------------------------------------------------------------------------------------------
+vertex_t vertices[] = {
+	-1,-1,-1, -1,-1,-1,
+	 1,-1,-1,  1,-1,-1,
+	 1, 1,-1,  1, 1,-1,
+	-1, 1,-1, -1, 1,-1,
+	-1,-1, 1, -1,-1, 1,
+	 1,-1, 1,  1,-1, 1,
+	 1, 1, 1,  1, 1, 1,
+	-1, 1, 1, -1, 1, 1
+};
+
+uint16_t indices[] = {
+	1, 2, 0,
+	2, 3, 0,
+	4, 6, 5,
+	7, 6, 4,
+	6, 2, 1,
+	5, 6, 1,
+	3, 7, 4,
+	0, 3, 4,
+	4, 5, 1,
+	0, 4, 1,
+	2, 7, 3,
+	2, 6, 7
+};
+
 
 //###################################################################################################################
 // Main Function
@@ -89,6 +143,20 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 	// Initialize OpenXR
 	//------------------------------------------------------------------------------------------------------
 	if (!InitXR()) {
+		return -1;
+	}
+
+	//------------------------------------------------------------------------------------------------------
+	// Initialize the DirectX pipeline
+	//------------------------------------------------------------------------------------------------------
+	if (!InitD3DPipeline()) {
+		return -1;
+	}
+
+	//------------------------------------------------------------------------------------------------------
+	// Initialize the DirectX graphics
+	//------------------------------------------------------------------------------------------------------
+	if (!InitD3DGraphics()) {
 		return -1;
 	}
 
@@ -413,4 +481,102 @@ swapchain_data_t CreateSwapchainRenderTargets(XrSwapchainImageD3D11KHR& swapchai
 	depth_buffer->Release();
 
 	return resulting_target;
+};
+
+bool InitD3DPipeline() {
+	HRESULT result;
+	//----------------------------------------------------------------------------------
+	// Compile the shaders and create the pixel & vertex shaders
+	//----------------------------------------------------------------------------------
+	ID3D10Blob* vert_shader_blob;
+	ID3D10Blob* pixel_shader_blob;
+	ID3D10Blob* errors;
+
+	// Compile the vertex shader
+	D3DCompileFromFile(L"shaders.hlsl", 0, 0, "VShader", "vs_5_0", D3D10_SHADER_OPTIMIZATION_LEVEL3, 0, &vert_shader_blob, &errors);
+	if (errors) {
+		MessageBox(NULL, "The vertex shader failed to compile.", "Error", MB_OK);
+		return false;
+	}
+
+	// Compile the pixel shader
+	D3DCompileFromFile(L"shaders.hlsl", 0, 0, "PShader", "ps_5_0", D3D10_SHADER_OPTIMIZATION_LEVEL3, 0, &pixel_shader_blob, &errors);
+	if (errors) {
+		MessageBox(NULL, "The pixel shader failed to compile.", "Error", MB_OK);
+		return false;
+	}
+
+	// Encapsulate both shaders into shader objects
+	result = d3d_device->CreateVertexShader(vert_shader_blob->GetBufferPointer(), vert_shader_blob->GetBufferSize(), NULL, &d3d_vertex_shader);
+	if (FAILED(result)) {
+		return false;
+	}
+	result = d3d_device->CreatePixelShader(pixel_shader_blob->GetBufferPointer(), pixel_shader_blob->GetBufferSize(), NULL, &d3d_pixel_shader);
+	if (FAILED(result)) {
+		return false;
+	}
+
+	// Set the shader objects
+	d3d_device_context->VSSetShader(d3d_vertex_shader, 0, 0);
+	d3d_device_context->PSSetShader(d3d_pixel_shader, 0, 0);
+
+	//----------------------------------------------------------------------------------
+	// Create the input layout. This describes to the GPU how the data is arranged
+	//----------------------------------------------------------------------------------
+
+	// For now, we'll only be using the position and the normal of the vertices
+	D3D11_INPUT_ELEMENT_DESC input_desc[] = {
+		{"SV_POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+		{"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0}
+	};
+
+	// Create the input layout
+	result = d3d_device->CreateInputLayout(input_desc, _countof(input_desc), vert_shader_blob->GetBufferPointer(), vert_shader_blob->GetBufferSize(), &d3d_input_layout);
+	if (FAILED(result)) {
+		return false;
+	}
+
+	// Tell the GPU to use that input layout
+	d3d_device_context->IASetInputLayout(d3d_input_layout);
+
+	//----------------------------------------------------------------------------------
+	// Create the constant buffer
+	//----------------------------------------------------------------------------------
+	D3D11_BUFFER_DESC const_buffer_desc;
+	ZeroMemory(&const_buffer_desc, sizeof(const_buffer_desc));
+	const_buffer_desc.ByteWidth = sizeof(const_buffer_t);
+	const_buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+
+	result = d3d_device->CreateBuffer(&const_buffer_desc, NULL, &d3d_const_buffer);
+	if (FAILED(result)) {
+		return false;
+	}
+
+	// And now set the constant buffer
+	d3d_device_context->VSSetConstantBuffers(0, 1, &d3d_const_buffer);
+
+	return true;
+};
+
+bool InitD3DGraphics() {
+	HRESULT result;
+
+	//----------------------------------------------------------------------------------
+	// Vertex buffer 
+	//----------------------------------------------------------------------------------
+
+	// Create the vertex buffer
+	D3D11_BUFFER_DESC vert_buffer_desc;
+	ZeroMemory(&vert_buffer_desc, sizeof(vert_buffer_desc));
+	vert_buffer_desc.ByteWidth = sizeof(vertices);
+	vert_buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+
+	// Create the buffer and copy the vertices into it as initial data
+	D3D11_SUBRESOURCE_DATA vert_buff_data = { vertices };
+	result = d3d_device->CreateBuffer(&vert_buffer_desc, &vert_buff_data, &d3d_vertex_buffer);
+	if (FAILED(result)) {
+		return false;
+	}
+
+	return true;
 };

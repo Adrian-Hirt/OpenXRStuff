@@ -21,5 +21,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />
+    <None Include="$(OpenXRLoaderBinaryRoot)\bin\openxr_loader.dll" />
+    <None Include="shaders.shader">
+      <Filter>Quelldateien</Filter>
+    </None>
   </ItemGroup>
 </Project>
