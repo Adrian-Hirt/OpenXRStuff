@@ -59,6 +59,7 @@ bool InitXrActions();
 void PollOpenXrEvents(bool& running, bool& xr_running);
 void PollOpenXrActions();
 void RenderOpenXrFrame();
+void RenderOpenXrLayer(XrTime predicted_time, std::vector<XrCompositionLayerProjectionView>& views, XrCompositionLayerProjection& layer_projection);
 
 //------------------------------------------------------------------------------------------------------
 // DirectX Methods
@@ -68,11 +69,13 @@ swapchain_data_t CreateSwapchainRenderTargets(XrSwapchainImageD3D11KHR& swapchai
 bool InitD3DPipeline();
 bool InitD3DGraphics();
 void ShutdownD3D();
+void RenderD3DLayer(XrCompositionLayerProjectionView& view, swapchain_data_t& swapchain_data);
 
 //------------------------------------------------------------------------------------------------------
 // App Methods
 //------------------------------------------------------------------------------------------------------
-void UpdateSimulation();
+void UpdateSimulation(XrTime predicted_time);
+void Draw(XrCompositionLayerProjectionView& view);
 
 
 //###################################################################################################################
@@ -201,10 +204,10 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 			// 1) Poll actions
 			PollOpenXrActions();
 
-			// 2) Update simulation
-			UpdateSimulation();
-
-			// 3) Render frame	
+			// 2) Render frame. We'll also call the method that updates the simulation in
+			//    that method, as we need to pass the predicted time (when the frame will
+			//	  be rendered) to the simulation, such that we're able to use the time
+			//	  to update the simulation accurately
 			RenderOpenXrFrame();
 		}
 
@@ -526,11 +529,112 @@ void PollOpenXrEvents(bool& loop_running, bool& xr_running) {
 }
 
 void PollOpenXrActions() {
-	// IMPLEMENT ME
+	// IMPLEMENT ME => First need to setup actions, but let's skip that for now
 };
 
 void RenderOpenXrFrame() {
-	// IMPLEMENT ME
+	XrResult result;
+
+	//------------------------------------------------------------------------------------------------------
+	// Setup the frame 
+	//------------------------------------------------------------------------------------------------------
+	// The call to xrWait frame will fill in the frame_state struct, where the field we'll
+	// be interested in is the predictedDisplayTime field.
+	// That field stores a prediction when the next frame will be displayed. This can be used to
+	// place objects, viewpoints, controllers etc. in the view
+	XrFrameState frame_state = {};
+	frame_state.type = XR_TYPE_FRAME_STATE;
+	result = xrWaitFrame(xr_session, NULL, &frame_state);
+	if (XR_FAILED(result)) {
+		return;
+	}
+
+	//------------------------------------------------------------------------------------------------------
+	// Begin the frame 
+	//------------------------------------------------------------------------------------------------------
+	result = xrBeginFrame(xr_session, NULL);
+	if (XR_FAILED(result)) {
+		return;
+	}
+
+	//------------------------------------------------------------------------------------------------------
+	// Call to UpdateSimulation which will update the simulation for the predicted rendering time
+	//------------------------------------------------------------------------------------------------------
+	UpdateSimulation(frame_state.predictedDisplayTime);
+
+	//------------------------------------------------------------------------------------------------------
+	// Render the layer
+	//------------------------------------------------------------------------------------------------------
+	XrCompositionLayerBaseHeader* layer = nullptr;
+	XrCompositionLayerProjection layer_projection = {};
+	layer_projection.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
+	std::vector<XrCompositionLayerProjectionView> views;
+
+	bool session_active = xr_session_state == XR_SESSION_STATE_VISIBLE || xr_session_state == XR_SESSION_STATE_FOCUSED;
+	uint32_t layer_count = 0;
+
+	if (session_active) {
+		RenderOpenXrLayer(frame_state.predictedDisplayTime, views, layer_projection);
+		layer = (XrCompositionLayerBaseHeader*)&layer_projection;
+		layer_count = 1;
+	}
+
+	//------------------------------------------------------------------------------------------------------
+	// Done rendeding the layer, send it to the display
+	//------------------------------------------------------------------------------------------------------
+	XrFrameEndInfo frame_end_info = {};
+	frame_end_info.type = XR_TYPE_FRAME_END_INFO;
+	frame_end_info.displayTime = frame_state.predictedDisplayTime;
+	frame_end_info.environmentBlendMode = xr_blend_mode;
+	frame_end_info.layerCount = layer_count;
+	frame_end_info.layers = &layer;
+	xrEndFrame(xr_session, &frame_end_info);
+};
+
+void RenderOpenXrLayer(XrTime predicted_time, std::vector<XrCompositionLayerProjectionView>& views, XrCompositionLayerProjection& layer_projection) {
+	uint32_t view_count = 0;
+
+	XrViewState view_state = {};
+	view_state.type = XR_TYPE_VIEW_STATE;
+
+	XrViewLocateInfo view_locate_info = {};
+	view_locate_info.type = XR_TYPE_VIEW_LOCATE_INFO;
+	view_locate_info.viewConfigurationType = app_config_view;
+	view_locate_info.displayTime = predicted_time;
+	view_locate_info.space = xr_app_space;
+
+	xrLocateViews(xr_session, &view_locate_info, &view_state, (uint32_t)xr_views.size(), &view_count, xr_views.data());
+	views.resize(view_count);
+
+	for (uint32_t i = 0; i < view_count; i++) {
+		uint32_t swapchain_image_id;
+		XrSwapchainImageAcquireInfo swapchain_acquire_info = {};
+		swapchain_acquire_info.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
+		xrAcquireSwapchainImage(xr_swapchains[i].handle, &swapchain_acquire_info, &swapchain_image_id);
+
+		XrSwapchainImageWaitInfo swapchain_wait_info = {};
+		swapchain_wait_info.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
+		swapchain_wait_info.timeout = XR_INFINITE_DURATION;
+		xrWaitSwapchainImage(xr_swapchains[i].handle, &swapchain_wait_info);
+
+		views[i] = {};
+		views[i].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
+		views[i].pose = xr_views[i].pose;
+		views[i].fov = xr_views[i].fov;
+		views[i].subImage.swapchain = xr_swapchains[i].handle;
+		views[i].subImage.imageRect.offset = { 0, 0 };
+		views[i].subImage.imageRect.extent = { xr_swapchains[i].width, xr_swapchains[i].height };
+
+		RenderD3DLayer(views[i], xr_swapchains[i].swapchain_data[swapchain_image_id]);
+
+		XrSwapchainImageReleaseInfo swapchain_release_info = {};
+		swapchain_release_info.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
+		xrReleaseSwapchainImage(xr_swapchains[i].handle, &swapchain_release_info);
+	}
+
+	layer_projection.space = xr_app_space;
+	layer_projection.viewCount = (uint32_t)views.size();
+	layer_projection.views = views.data();
 };
 
 //###################################################################################################################
@@ -769,9 +873,33 @@ void ShutdownD3D() {
 	}
 }
 
+void RenderD3DLayer(XrCompositionLayerProjectionView& view, swapchain_data_t& swapchain_data) {
+	XrRect2Di& image_rect = view.subImage.imageRect;
+	D3D11_VIEWPORT viewport = {};
+	viewport.TopLeftX = (float)image_rect.offset.x;
+	viewport.TopLeftY = (float)image_rect.offset.y;
+	viewport.Width = (float)image_rect.extent.width;
+	viewport.Height = (float)image_rect.extent.height;
+
+	d3d_device_context->RSSetViewports(1, &viewport);
+
+	float clear_color[] = { 0, 0, 0, 1 };
+	d3d_device_context->ClearRenderTargetView(swapchain_data.back_buffer, clear_color);
+
+	d3d_device_context->ClearDepthStencilView(swapchain_data.depth_buffer, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+
+	d3d_device_context->OMSetRenderTargets(1, &swapchain_data.back_buffer, swapchain_data.depth_buffer);
+
+	Draw(view);
+};
+
 //###################################################################################################################
 // App Methods
 //###################################################################################################################
-void UpdateSimulation() {
+void UpdateSimulation(XrTime predicted_time) {
+	// IMPLEMENT ME
+}
+
+void Draw(XrCompositionLayerProjectionView& view) {
 	// IMPLEMENT ME
 }
