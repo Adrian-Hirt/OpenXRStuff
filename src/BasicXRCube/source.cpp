@@ -50,11 +50,29 @@ struct const_buffer_t {
 //###################################################################################################################
 // Function declarations
 //###################################################################################################################
-bool InitXR();
+
+//------------------------------------------------------------------------------------------------------
+// OpenXR Methods
+//------------------------------------------------------------------------------------------------------
+bool InitXr();
+bool InitXrActions();
+void PollOpenXrEvents(bool& running, bool& xr_running);
+void PollOpenXrActions();
+void RenderOpenXrFrame();
+
+//------------------------------------------------------------------------------------------------------
+// DirectX Methods
+//------------------------------------------------------------------------------------------------------
 bool InitD3DDevice(LUID& adapter_luid);
 swapchain_data_t CreateSwapchainRenderTargets(XrSwapchainImageD3D11KHR& swapchain_image);
 bool InitD3DPipeline();
 bool InitD3DGraphics();
+void ShutdownD3D();
+
+//------------------------------------------------------------------------------------------------------
+// App Methods
+//------------------------------------------------------------------------------------------------------
+void UpdateSimulation();
 
 
 //###################################################################################################################
@@ -73,6 +91,7 @@ XrViewConfigurationType app_config_view = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STE
 //------------------------------------------------------------------------------------------------------
 XrInstance xr_instance = {}; // The OpenXR instance
 XrSession xr_session = {}; // Thw OpenXR session
+XrSessionState xr_session_state = XR_SESSION_STATE_UNKNOWN; // The session state
 XrSystemId xr_system_id = XR_NULL_SYSTEM_ID; // The OpenXR System, identified by its ID
 XrEnvironmentBlendMode xr_blend_mode; // Blend Mode (transparent / opaque) to use for the application
 XrSpace xr_app_space = {};
@@ -142,7 +161,14 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 	//------------------------------------------------------------------------------------------------------
 	// Initialize OpenXR
 	//------------------------------------------------------------------------------------------------------
-	if (!InitXR()) {
+	if (!InitXr()) {
+		return -1;
+	}
+
+	//------------------------------------------------------------------------------------------------------
+	// Initialize the OpenXR Actions
+	//------------------------------------------------------------------------------------------------------
+	if (!InitXrActions()) {
 		return -1;
 	}
 
@@ -160,6 +186,41 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 		return -1;
 	}
 
+	//------------------------------------------------------------------------------------------------------
+	// Main Loop
+	//------------------------------------------------------------------------------------------------------
+	bool loop_running = true;
+	bool xr_running = false;
+
+	while (loop_running) {
+		// Poll the OpenXR events, and if OpenXR reports to still be running, keep going on
+		PollOpenXrEvents(loop_running, xr_running);
+
+		if (xr_running) {
+			// TODO: If OpenXR is still running
+			// 1) Poll actions
+			PollOpenXrActions();
+
+			// 2) Update simulation
+			UpdateSimulation();
+
+			// 3) Render frame	
+			RenderOpenXrFrame();
+		}
+
+		// DEBUG; REMOVE LATER
+		loop_running = false;
+	}
+
+	//------------------------------------------------------------------------------------------------------
+	// Shutdown D3D
+	//------------------------------------------------------------------------------------------------------
+	ShutdownD3D();
+
+
+	//------------------------------------------------------------------------------------------------------
+	// We're done
+	//------------------------------------------------------------------------------------------------------
 	return 0;
 };
 
@@ -167,7 +228,7 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 //###################################################################################################################
 // OpenXR Methods
 //###################################################################################################################
-bool InitXR() {
+bool InitXr() {
 	XrResult result;
 
 	//------------------------------------------------------------------------------------------------------
@@ -369,6 +430,108 @@ bool InitXR() {
 	return true;
 }
 
+bool InitXrActions() {
+	// IMPLEMENT ME
+	return true;
+}
+
+void PollOpenXrEvents(bool& loop_running, bool& xr_running) {
+	XrResult result;
+
+	// "Reset" this to true, if we need to exit the loop because of a
+	// state change, we'll change this value later
+	loop_running = true;
+
+	// Struct to save the event data in.
+	// We'll pass this to the xrPollEvent call, where the details of the
+	// event will be stored in thhis struct.
+	XrEventDataBuffer event_data_buffer = { XR_TYPE_EVENT_DATA_BUFFER };
+
+	// Keep polling events as long as xrPollEvent returns events.
+	// The call to xrPollEvent fetches the "next event" of the xr_instance,
+	// and stores the event data inside the event data buffer we created earlier.
+	// We use the XR_UNQUALIFIED_SUCCESS macro to see if the xrPollEvent call
+	// was successful (i.e. was able to fetch an event)
+	// If there are no more events left over, we can end.
+	while (XR_UNQUALIFIED_SUCCESS(xrPollEvent(xr_instance, &event_data_buffer))) {
+		// State of the session changed, maybe we need to do something
+		if (event_data_buffer.type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
+			XrEventDataSessionStateChanged* state_change = (XrEventDataSessionStateChanged*)&event_data_buffer;
+
+			// Set the global state of the xr session to the state we just got from the call
+			// to xrPollEvent
+			xr_session_state = state_change->state;
+
+			switch (xr_session_state) {
+				// Session is in the READY state, which means we can call xrBeginSession to
+				// enter the SYNCHRONITED state (see OpenXR reference guide) at the Khronos
+				// website: https://www.khronos.org/files/openxr-10-reference-guide.pdf
+				// for more details about the state transitions
+				case XR_SESSION_STATE_READY: {
+					// We need to supply the call to xrBeginSession a valid XrSessionBeginInfo
+					// struct. The only thing we need to set here is the primaryViewConfigurationType
+					// field, which we configured previously. Usually, for head mounted devices
+					// such as a VR headset or the Hololens, this is XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO
+					// (i.e. two images will be rendered)
+					XrSessionBeginInfo session_begin_info = {};
+					session_begin_info.type = XR_TYPE_SESSION_BEGIN_INFO;
+					session_begin_info.primaryViewConfigurationType = app_config_view;
+
+					// Start the session. If the call was successful, set the xr_running flag
+					// to true
+					result = xrBeginSession(xr_session, &session_begin_info);
+					if (XR_FAILED(result)) {
+						MessageBox(NULL, "Couldn't begin the XR session.", "Error", MB_OK);
+						return;
+					}
+					xr_running = true;
+					break;
+				}
+				case XR_SESSION_STATE_STOPPING: {
+					// Session is in the STOPPING state, where we need to call xrEndSession
+					// to enter the IDLE state
+					xr_running = false;
+					result = xrEndSession(xr_session);
+					if (XR_FAILED(result)) {
+						MessageBox(NULL, "Couldn't end the XR session.", "Error", MB_OK);
+						return;
+					}
+					break;
+				}
+				case XR_SESSION_STATE_EXITING: {
+					// State after the user quit, here we need to break out from the loop
+					// and quit the application
+					loop_running = false;
+					break;
+				}
+				case XR_SESSION_STATE_LOSS_PENDING: {
+					// The runtime is losing the system or the device, need to break
+					// out from the main loop and quit the application
+					loop_running = false;
+					break;
+				}
+			}
+		}
+		// Instance seems to be shutting down, need to break out from the main loop
+		// and quit the aplication
+		else if (event_data_buffer.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
+			loop_running = false;
+			return;
+		}
+		
+		// "Reset" the event data buffer, such that it's ready for the next event
+		// being fetched (if there is any to be fetched)
+		event_data_buffer = { XR_TYPE_EVENT_DATA_BUFFER };
+	}
+}
+
+void PollOpenXrActions() {
+	// IMPLEMENT ME
+};
+
+void RenderOpenXrFrame() {
+	// IMPLEMENT ME
+};
 
 //###################################################################################################################
 // D3D Methods
@@ -595,3 +758,20 @@ bool InitD3DGraphics() {
 
 	return true;
 };
+
+void ShutdownD3D() {
+	if (d3d_device_context) {
+		d3d_device_context->Release();
+	}
+
+	if (d3d_device) {
+		d3d_device->Release();
+	}
+}
+
+//###################################################################################################################
+// App Methods
+//###################################################################################################################
+void UpdateSimulation() {
+	// IMPLEMENT ME
+}
