@@ -493,14 +493,14 @@ bool InitD3DPipeline() {
 	ID3D10Blob* errors;
 
 	// Compile the vertex shader
-	D3DCompileFromFile(L"shaders.hlsl", 0, 0, "VShader", "vs_5_0", D3D10_SHADER_OPTIMIZATION_LEVEL3, 0, &vert_shader_blob, &errors);
+	D3DCompileFromFile(L"shaders.shader", 0, 0, "VShader", "vs_5_0", D3D10_SHADER_OPTIMIZATION_LEVEL3, 0, &vert_shader_blob, &errors);
 	if (errors) {
 		MessageBox(NULL, "The vertex shader failed to compile.", "Error", MB_OK);
 		return false;
 	}
 
 	// Compile the pixel shader
-	D3DCompileFromFile(L"shaders.hlsl", 0, 0, "PShader", "ps_5_0", D3D10_SHADER_OPTIMIZATION_LEVEL3, 0, &pixel_shader_blob, &errors);
+	D3DCompileFromFile(L"shaders.shader", 0, 0, "PShader", "ps_5_0", D3D10_SHADER_OPTIMIZATION_LEVEL3, 0, &pixel_shader_blob, &errors);
 	if (errors) {
 		MessageBox(NULL, "The pixel shader failed to compile.", "Error", MB_OK);
 		return false;
@@ -574,6 +574,21 @@ bool InitD3DGraphics() {
 	// Create the buffer and copy the vertices into it as initial data
 	D3D11_SUBRESOURCE_DATA vert_buff_data = { vertices };
 	result = d3d_device->CreateBuffer(&vert_buffer_desc, &vert_buff_data, &d3d_vertex_buffer);
+	if (FAILED(result)) {
+		return false;
+	}
+
+	//----------------------------------------------------------------------------------
+	// Index buffer 
+	//----------------------------------------------------------------------------------
+	D3D11_BUFFER_DESC index_buffer_desc;
+	ZeroMemory(&index_buffer_desc, sizeof(index_buffer_desc));
+	index_buffer_desc.ByteWidth = sizeof(indices);
+	index_buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
+
+	// Create the buffer and copy the indices into it as initial data
+	D3D11_SUBRESOURCE_DATA index_buffer_data = { indices };
+	result = d3d_device->CreateBuffer(&index_buffer_desc, &index_buffer_data, &d3d_index_buffer);
 	if (FAILED(result)) {
 		return false;
 	}
