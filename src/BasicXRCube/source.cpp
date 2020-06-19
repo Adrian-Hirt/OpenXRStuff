@@ -570,6 +570,11 @@ void RenderOpenXrFrame() {
 	layer_projection.type = XR_TYPE_COMPOSITION_LAYER_PROJECTION;
 	std::vector<XrCompositionLayerProjectionView> views;
 
+	// Check if the xrSession is in a state that we actually need to render. If the session isn't in the
+	// VISIBLE or in the FOCUSED state, we don't need to render the layer (e.g. when the user of the
+	// application takes off the vr headset while the application still is running. In that case,
+	// we need to keep the application (and the simulation) running, but there is no point in rendering
+	// anything.
 	bool session_active = xr_session_state == XR_SESSION_STATE_VISIBLE || xr_session_state == XR_SESSION_STATE_FOCUSED;
 	uint32_t layer_count = 0;
 
@@ -594,29 +599,61 @@ void RenderOpenXrFrame() {
 void RenderOpenXrLayer(XrTime predicted_time, std::vector<XrCompositionLayerProjectionView>& views, XrCompositionLayerProjection& layer_projection) {
 	uint32_t view_count = 0;
 
+	//------------------------------------------------------------------------------------------------------
+	// Setup the views for the predicted rendering time
+	//------------------------------------------------------------------------------------------------------
+	// We got the predicted time from the OpenXR runtime at which it will render the next frame (i.e. the
+	// frame we're preparing to render right now.
+	// We can use this predicted time to call the method xrLocateViews, which will return the view and
+	// projection info for a particular time.
 	XrViewState view_state = {};
 	view_state.type = XR_TYPE_VIEW_STATE;
 
+	// Setup an info struct which we'll pass into the xrLocateView call with informations about the
+	// predicted time, the type of view we have and the xr space we're in
 	XrViewLocateInfo view_locate_info = {};
 	view_locate_info.type = XR_TYPE_VIEW_LOCATE_INFO;
 	view_locate_info.viewConfigurationType = app_config_view;
 	view_locate_info.displayTime = predicted_time;
 	view_locate_info.space = xr_app_space;
 
+	// Call xrLocateViews, which will give us the number of views we have to render (stored in view_count), as
+	// well as fill in the xr_views vector with the predicted views (which is basically a struct containing
+	// the pose of the view, as well as the fov for that view. We'll use these two later to render with D3D11,
+	// as we need to modify the objects and the view before rendering.
 	xrLocateViews(xr_session, &view_locate_info, &view_state, (uint32_t)xr_views.size(), &view_count, xr_views.data());
 	views.resize(view_count);
 
+	//------------------------------------------------------------------------------------------------------
+	// Render the layer for each view
+	//------------------------------------------------------------------------------------------------------
 	for (uint32_t i = 0; i < view_count; i++) {
+		// First, we need to acquire a swapchain image, as we need a render target to render the data
+		// to. As a reminder (from the CreateSwapchainRenderTargets method), a swapchain image
+		// in the context of D3D11 is the buffer we want to render to.
+		// As we don't pass a swapchain_image_id into the xrAcquireSwapchainImage call, the runtime decides
+		// which swapchain image we'll get
 		uint32_t swapchain_image_id;
 		XrSwapchainImageAcquireInfo swapchain_acquire_info = {};
 		swapchain_acquire_info.type = XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO;
 		xrAcquireSwapchainImage(xr_swapchains[i].handle, &swapchain_acquire_info, &swapchain_image_id);
 
+		// We need to wait until the swapchain image is available for writing, as the compositor
+		// could still be reading from it (writing while the compositor is still reading could
+		// result in tearing or otherwise badly rendered frames).
+		// For now, we set the timeout to infinite, but one could also set another timeout
+		// by passing in an xrDuration
 		XrSwapchainImageWaitInfo swapchain_wait_info = {};
 		swapchain_wait_info.type = XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO;
 		swapchain_wait_info.timeout = XR_INFINITE_DURATION;
 		xrWaitSwapchainImage(xr_swapchains[i].handle, &swapchain_wait_info);
 
+		// Setup the info we need to render the layer for the current view. The XrCompositionLayerProjectionView
+		// is a projection layer element, which has the pose of the current view (pose = location and orientation),
+		// the fov of the current view, and the swapchain sub image, which holds the data for the composition
+		// layer.
+		// The subimage is of type XrSwapchainSubImage, which has a field to the swapchain to display and an
+		// imageRect, which represents the valid portion of the image to use (in pixels)
 		views[i] = {};
 		views[i].type = XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW;
 		views[i].pose = xr_views[i].pose;
@@ -625,13 +662,25 @@ void RenderOpenXrLayer(XrTime predicted_time, std::vector<XrCompositionLayerProj
 		views[i].subImage.imageRect.offset = { 0, 0 };
 		views[i].subImage.imageRect.extent = { xr_swapchains[i].width, xr_swapchains[i].height };
 
+		// Call the RenderD3D method, which will call the Draw method which will eventually render the
+		// content to the swapchain. With this call hierarchy, it should be possible to simply adapt the
+		// Draw method if other content is to be rendered
 		RenderD3DLayer(views[i], xr_swapchains[i].swapchain_data[swapchain_image_id]);
 
+		// We're done rendering for the current view, so we can release the swapchain image (i.e. tell
+		// the OpenXR runtime that we're done with this swapchain image.
+		// We have to pass in a XrSwapchainImageReleaseInfo, but at the moment, this struct doesn't
+		// do anything special.
 		XrSwapchainImageReleaseInfo swapchain_release_info = {};
 		swapchain_release_info.type = XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO;
 		xrReleaseSwapchainImage(xr_swapchains[i].handle, &swapchain_release_info);
 	}
 
+	//------------------------------------------------------------------------------------------------------
+	// Set the rendered data to be displayed
+	//------------------------------------------------------------------------------------------------------
+	// Now thta we're done rendering all views, we can update the layer projection we got passed into
+	// the method with the rendered views, such that we can display them.
 	layer_projection.space = xr_app_space;
 	layer_projection.viewCount = (uint32_t)views.size();
 	layer_projection.views = views.data();
@@ -874,6 +923,14 @@ void ShutdownD3D() {
 }
 
 void RenderD3DLayer(XrCompositionLayerProjectionView& view, swapchain_data_t& swapchain_data) {
+	//----------------------------------------------------------------------------------
+	// Setup viewport
+	//----------------------------------------------------------------------------------
+	// For D3D11 to render correctly, we need to create a D3D11_VIEWPORT struct and
+	// set the top left XY coordinates of the viewport, as well as the width and height
+	// of the viewport.
+	// As this should match the size of the swapchain, we just use the size of the
+	// subimage we set previously
 	XrRect2Di& image_rect = view.subImage.imageRect;
 	D3D11_VIEWPORT viewport = {};
 	viewport.TopLeftX = (float)image_rect.offset.x;
@@ -881,13 +938,27 @@ void RenderD3DLayer(XrCompositionLayerProjectionView& view, swapchain_data_t& sw
 	viewport.Width = (float)image_rect.extent.width;
 	viewport.Height = (float)image_rect.extent.height;
 
+	// Now we can set the viewport of the device context
 	d3d_device_context->RSSetViewports(1, &viewport);
 
+	//----------------------------------------------------------------------------------
+	// Clear the Buffers
+	//----------------------------------------------------------------------------------
+	// It's usually nessecary to clear the backbuffer (as it usually still contains the
+	// data from the previous frame). This is usually done by setting all the data
+	// (pixels) to a single color.
 	float clear_color[] = { 0, 0, 0, 1 };
 	d3d_device_context->ClearRenderTargetView(swapchain_data.back_buffer, clear_color);
 
+	// Also clear the depth buffer, such that it's ready for rendering
 	d3d_device_context->ClearDepthStencilView(swapchain_data.depth_buffer, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 
+	//----------------------------------------------------------------------------------
+	// Set the render target
+	//----------------------------------------------------------------------------------
+	// Now we can set the target of all render operations to the backbuffer of the
+	// swapchain we're using.
+	// This will render all our content to that backbuffer.
 	d3d_device_context->OMSetRenderTargets(1, &swapchain_data.back_buffer, swapchain_data.depth_buffer);
 
 	Draw(view);
