@@ -42,9 +42,20 @@ struct vertex_t {
 	float norm_x, norm_y, norm_z; // Normal Vector
 };
 
+typedef struct RGBA {
+	FLOAT r;
+	FLOAT g;
+	FLOAT b;
+	FLOAT a;
+} RGBA;
+
 struct const_buffer_t {
 	DirectX::XMFLOAT4X4 world;
 	DirectX::XMFLOAT4X4 view_projection;
+	DirectX::XMFLOAT4X4 rotation;
+	DirectX::XMFLOAT4 light_vector;
+	RGBA light_color;
+	RGBA ambient_color;
 };
 
 //###################################################################################################################
@@ -981,10 +992,10 @@ DirectX::XMMATRIX CreateViewProjectionMatrix(XrCompositionLayerProjectionView& v
 	// Construct the left, right, top and bottom values to pass into the
 	// XMMatrixPerspectiveOffCenterRH call. These 4 values represent the x and y
 	// coordinates respectively of the view frustum at the near plane.
-	const float left = near_clipping * tan(view.fov.angleLeft);
-	const float right = near_clipping * tan(view.fov.angleRight);
-	const float top = near_clipping * tan(view.fov.angleUp);
-	const float bottom = near_clipping * tan(view.fov.angleDown);
+	const float left = near_clipping * tanf(view.fov.angleLeft);
+	const float right = near_clipping * tanf(view.fov.angleRight);
+	const float top = near_clipping * tanf(view.fov.angleUp);
+	const float bottom = near_clipping * tanf(view.fov.angleDown);
 
 	// Construct the projection matrix from the values we just calculated
 	DirectX::XMMATRIX projection_matrix = DirectX::XMMatrixPerspectiveOffCenterRH(left, right, bottom, top, near_clipping, far_clipping);
@@ -1062,7 +1073,13 @@ void Draw(XrCompositionLayerProjectionView& view) {
 
 	// And finally we'll tell the renderer that we want to render a trianglelist
 	d3d_device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-	
+
+	//----------------------------------------------------------------------------------
+	// Setup lighting
+	//----------------------------------------------------------------------------------
+	transform_buffer.light_vector = DirectX::XMFLOAT4(1.0f, 1.0f, 1.0f, 0.0f);
+	transform_buffer.light_color = { 0.5f, 0.5f, 0.5f, 1.0f };
+	transform_buffer.ambient_color = { 0.2f, 0.2f, 0.2f, 1.0f };
 
 	//----------------------------------------------------------------------------------
 	// Draw a single cube
@@ -1084,6 +1101,11 @@ void Draw(XrCompositionLayerProjectionView& view) {
 
 	// Store the model matrix for our cube in the constant buffer for the shader
 	DirectX::XMStoreFloat4x4(&transform_buffer.world, DirectX::XMMatrixTranspose(model_matrix));
+
+	// We also need to store the rotation matrix (of the cube), as we need it to correctly
+	// light up the cube
+	DirectX::XMMATRIX object_rotation = CreateRotationMatrix(view);
+	DirectX::XMStoreFloat4x4(&transform_buffer.rotation, object_rotation);
 
 	// Send the constant buffer to the GPU, such that the shader can use it
 	d3d_device_context->UpdateSubresource(d3d_const_buffer, 0, NULL, &transform_buffer, 0, 0);

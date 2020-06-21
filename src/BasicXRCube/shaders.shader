@@ -1,11 +1,15 @@
 cbuffer TransformBuffer {
 	float4x4 world;
-	float4x4 viewproj;
+	float4x4 view_projection;
+	float4x4 rotation;
+	float4 light_vector;
+	float4 light_color;
+	float4 ambient_color;
 };
 
 struct vsIn {
-	float4 pos  : SV_POSITION;
-	float3 norm : NORMAL;
+	float4 position  : SV_POSITION;
+	float4 normal : NORMAL;
 };
 
 struct psIn {
@@ -15,12 +19,16 @@ struct psIn {
 
 psIn VShader(vsIn input) {
 	psIn output;
-	output.pos = mul(float4(input.pos.xyz, 1), world);
-	output.pos = mul(output.pos, viewproj);
 
-	float3 normal = normalize(mul(float4(input.norm, 0), world).xyz);
+	// Calculate the position
+	output.pos = mul(mul(input.position, world), view_projection);
 
-	output.color = saturate(dot(normal, float3(0, 1, 0))).xxxx;
+	// Calculate the color
+	output.color = ambient_color;
+	float4 norm = normalize(mul(rotation, input.normal));
+	float diffuse_brightness = saturate(dot(norm, light_vector));
+	output.color += light_color * diffuse_brightness;
+
 	return output;
 }
 
