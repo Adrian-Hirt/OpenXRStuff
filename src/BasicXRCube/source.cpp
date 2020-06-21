@@ -81,6 +81,7 @@ bool InitD3DPipeline();
 bool InitD3DGraphics();
 void ShutdownD3D();
 void RenderD3DLayer(XrCompositionLayerProjectionView& view, swapchain_data_t& swapchain_data);
+DirectX::XMMATRIX CreateViewProjectionMatrix(XrCompositionLayerProjectionView& view);
 
 //------------------------------------------------------------------------------------------------------
 // App Methods
@@ -141,30 +142,53 @@ PFN_xrGetD3D11GraphicsRequirementsKHR ext_xrGetD3D11GraphicsRequirementsKHR;
 // The data to draw
 //------------------------------------------------------------------------------------------------------
 vertex_t vertices[] = {
-	-1,-1,-1, -1,-1,-1,
-	 1,-1,-1,  1,-1,-1,
-	 1, 1,-1,  1, 1,-1,
-	-1, 1,-1, -1, 1,-1,
-	-1,-1, 1, -1,-1, 1,
-	 1,-1, 1,  1,-1, 1,
-	 1, 1, 1,  1, 1, 1,
-	-1, 1, 1, -1, 1, 1
+		{-1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f},    // side 1
+		{1.0f, -1.0f, 1.0f, 0.0f, 0.0f, 1.0f},
+		{-1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f},
+		{1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f},
+
+		{-1.0f, -1.0f, -1.0f, 0.0f, 0.0f, -1.0f},    // side 2
+		{-1.0f, 1.0f, -1.0f, 0.0f, 0.0f, -1.0f},
+		{1.0f, -1.0f, -1.0f, 0.0f, 0.0f, -1.0f},
+		{1.0f, 1.0f, -1.0f, 0.0f, 0.0f, -1.0f},
+
+		{-1.0f, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f},    // side 3
+		{-1.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f},
+		{1.0f, 1.0f, -1.0f, 0.0f, 1.0f, 0.0f},
+		{1.0f, 1.0f, 1.0f, 0.0f, 1.0f, 0.0f},
+
+		{-1.0f, -1.0f, -1.0f, 0.0f, -1.0f, 0.0f},    // side 4
+		{1.0f, -1.0f, -1.0f, 0.0f, -1.0f, 0.0f},
+		{-1.0f, -1.0f, 1.0f, 0.0f, -1.0f, 0.0f},
+		{1.0f, -1.0f, 1.0f, 0.0f, -1.0f, 0.0f},
+
+		{1.0f, -1.0f, -1.0f, 1.0f, 0.0f, 0.0f},    // side 5
+		{1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 0.0f},
+		{1.0f, -1.0f, 1.0f, 1.0f, 0.0f, 0.0f},
+		{1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f},
+
+		{-1.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0f},    // side 6
+		{-1.0f, -1.0f, 1.0f, -1.0f, 0.0f, 0.0f},
+		{-1.0f, 1.0f, -1.0f, -1.0f, 0.0f, 0.0f},
+		{-1.0f, 1.0f, 1.0f, -1.0f, 0.0f, 0.0f},
 };
 
 uint16_t indices[] = {
-	1, 2, 0,
-	2, 3, 0,
-	4, 6, 5,
-	7, 6, 4,
-	6, 2, 1,
-	5, 6, 1,
-	3, 7, 4,
-	0, 3, 4,
-	4, 5, 1,
-	0, 4, 1,
-	2, 7, 3,
-	2, 6, 7
+	2, 1, 0,    // side 1
+	3, 1, 2,
+	6, 5, 4,    // side 2
+	7, 5, 6,
+	10, 9, 8,    // side 3
+	11, 9, 10,
+	14, 13, 12,    // side 4
+	15, 13, 14,
+	18, 17, 16,    // side 5
+	19, 17, 18,
+	22, 21, 20,    // side 6
+	23, 21, 22
 };
+
+DirectX::XMFLOAT3 cube_rotation_angles = { 0.0f, 0.0f, 0.0f };
 
 
 //###################################################################################################################
@@ -854,7 +878,7 @@ bool InitD3DPipeline() {
 	// For now, we'll only be using the position and the normal of the vertices
 	D3D11_INPUT_ELEMENT_DESC input_desc[] = {
 		{"SV_POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
-		{"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0}
+		{"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0}
 	};
 
 	// Create the input layout
@@ -958,7 +982,7 @@ void RenderD3DLayer(XrCompositionLayerProjectionView& view, swapchain_data_t& sw
 	// It's usually nessecary to clear the backbuffer (as it usually still contains the
 	// data from the previous frame). This is usually done by setting all the data
 	// (pixels) to a single color.
-	float clear_color[] = { 0, 0, 0, 1 };
+	float clear_color[] = { 0.0f, 0.2f, 0.4f, 1.0f };
 	d3d_device_context->ClearRenderTargetView(swapchain_data.back_buffer, clear_color);
 
 	// Also clear the depth buffer, such that it's ready for rendering
@@ -1029,19 +1053,12 @@ DirectX::XMMATRIX CreateViewProjectionMatrix(XrCompositionLayerProjectionView& v
 	return DirectX::XMMatrixTranspose(view_matrix * projection_matrix);
 }
 
-// Helper method to create a rotation matrix from a view
-DirectX::XMMATRIX CreateRotationMatrix(XrCompositionLayerProjectionView& view) {
-	// Load the orientation quaternion into a vector which we then pass to the
-	// XMMatrixRotationQuaternion call to create the rotation matrix
-	DirectX::XMVECTOR rotation_vector = DirectX::XMLoadFloat4((DirectX::XMFLOAT4*) & view.pose.orientation);
-	return DirectX::XMMatrixRotationQuaternion(rotation_vector);
-}
-
 //###################################################################################################################
 // App Methods
 //###################################################################################################################
 void UpdateSimulation(XrTime predicted_time) {
-	// IMPLEMENT ME
+	cube_rotation_angles.x += 0.02f;
+	cube_rotation_angles.y += 0.04f;
 }
 
 void Draw(XrCompositionLayerProjectionView& view) {
@@ -1084,9 +1101,11 @@ void Draw(XrCompositionLayerProjectionView& view) {
 	//----------------------------------------------------------------------------------
 	// Draw a single cube
 	//----------------------------------------------------------------------------------
-	// Get the rotation we'll apply to the cube. Here, we'll use the xr_pose_identity we
-	// defined previously, which means the cube has "no rotation"
-	DirectX::XMVECTOR model_rotation = DirectX::XMLoadFloat4((DirectX::XMFLOAT4*) &xr_pose_identity.orientation);
+	// Load the rotation angles (roll, pitch, yaw) into a XMVECTOR
+	DirectX::XMVECTOR rotation_angles = DirectX::XMLoadFloat3(&cube_rotation_angles);
+
+	// Get the rotation we'll apply to the cube. Here, we need a quaternion
+	DirectX::XMVECTOR model_rotation = DirectX::XMQuaternionRotationRollPitchYawFromVector(rotation_angles);
 
 	// Get the translation which we'll apply to the cube. We'll also use the xr_pose_identity,
 	// which means the cube is positioned at (0, 0, 0), i.e. the origin.
@@ -1103,8 +1122,8 @@ void Draw(XrCompositionLayerProjectionView& view) {
 	DirectX::XMStoreFloat4x4(&transform_buffer.world, DirectX::XMMatrixTranspose(model_matrix));
 
 	// We also need to store the rotation matrix (of the cube), as we need it to correctly
-	// light up the cube
-	DirectX::XMMATRIX object_rotation = CreateRotationMatrix(view);
+	// light up the cube. Here, we need a vector instead of a quaternion
+	DirectX::XMMATRIX object_rotation = DirectX::XMMatrixRotationRollPitchYawFromVector(rotation_angles);
 	DirectX::XMStoreFloat4x4(&transform_buffer.rotation, object_rotation);
 
 	// Send the constant buffer to the GPU, such that the shader can use it
