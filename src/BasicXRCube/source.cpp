@@ -212,7 +212,7 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 		}
 
 		// DEBUG; REMOVE LATER
-		loop_running = false;
+		//loop_running = false;
 	}
 
 	//------------------------------------------------------------------------------------------------------
@@ -964,6 +964,68 @@ void RenderD3DLayer(XrCompositionLayerProjectionView& view, swapchain_data_t& sw
 	Draw(view);
 };
 
+// Helper method that takes a XrCompositionLayerProjectionView and calculates the
+// ViewProjection matrix from it, such that we can pass that matrix to the constant buffer
+// and finally to the shader to correctly transform the objects.
+DirectX::XMMATRIX CreateViewProjectionMatrix(XrCompositionLayerProjectionView& view) {
+	//----------------------------------------------------------------------------------
+	// Build projection matrix
+	//----------------------------------------------------------------------------------
+	// Define the far plane and the near plane. A value often used for the near
+	// clipping in desktop applications is 1.0f, however that seems to be too high
+	// for XR applications, as objects "relatively" close to the user already vanish
+	// from the view, even when you would expect them not to
+	const float near_clipping = 0.05f;
+	const float far_clipping = 100.0f;
+
+	// Construct the left, right, top and bottom values to pass into the
+	// XMMatrixPerspectiveOffCenterRH call. These 4 values represent the x and y
+	// coordinates respectively of the view frustum at the near plane.
+	const float left = near_clipping * tan(view.fov.angleLeft);
+	const float right = near_clipping * tan(view.fov.angleRight);
+	const float top = near_clipping * tan(view.fov.angleUp);
+	const float bottom = near_clipping * tan(view.fov.angleDown);
+
+	// Construct the projection matrix from the values we just calculated
+	DirectX::XMMATRIX projection_matrix = DirectX::XMMatrixPerspectiveOffCenterRH(left, right, bottom, top, near_clipping, far_clipping);
+
+	//----------------------------------------------------------------------------------
+	// Build view matrix
+	//----------------------------------------------------------------------------------
+	// Load the orientation quaternion into a vector, such that we can use it to construct
+	// an affine transformation
+	DirectX::XMVECTOR view_rotation = DirectX::XMLoadFloat4((DirectX::XMFLOAT4*) & view.pose.orientation);
+
+	// Also load the position vector into a 3-component vector
+	DirectX::GXMVECTOR view_translation = DirectX::XMLoadFloat3((DirectX::XMFLOAT3*) & view.pose.position);
+
+	// Build an affine transformation, represented as a matrix, of the view transformation
+	// The first argument is the scaling factor. As we don't want to scale anything right now,
+	// we pass in a vector with all ones.
+	// The second argument is the point identifying the origin of the rotation, which we set
+	// to (0, 0, 0), such that we rotate about the origin
+	// As third argument we pass the rotation we loaded before, and as fourth argument
+	// the translation we loaded before. 
+	DirectX::XMMATRIX view_transformation_matrix = DirectX::XMMatrixAffineTransformation(DirectX::g_XMOne, DirectX::g_XMZero, view_rotation, view_translation);
+
+	// We then need to inverse the matrix. The first argument could be a pointer to a
+	// XMVECTOR which would store the determinant. As we don't care about the
+	// determinant, we just pass in NULL
+	DirectX::XMMATRIX view_matrix = DirectX::XMMatrixInverse(NULL, view_transformation_matrix);
+
+	// Finally, return the Transpose of the product of the view matrix and the projection
+	// matrix
+	return DirectX::XMMatrixTranspose(view_matrix * projection_matrix);
+}
+
+// Helper method to create a rotation matrix from a view
+DirectX::XMMATRIX CreateRotationMatrix(XrCompositionLayerProjectionView& view) {
+	// Load the orientation quaternion into a vector which we then pass to the
+	// XMMatrixRotationQuaternion call to create the rotation matrix
+	DirectX::XMVECTOR rotation_vector = DirectX::XMLoadFloat4((DirectX::XMFLOAT4*) & view.pose.orientation);
+	return DirectX::XMMatrixRotationQuaternion(rotation_vector);
+}
+
 //###################################################################################################################
 // App Methods
 //###################################################################################################################
@@ -972,5 +1034,60 @@ void UpdateSimulation(XrTime predicted_time) {
 }
 
 void Draw(XrCompositionLayerProjectionView& view) {
-	// IMPLEMENT ME
+	//----------------------------------------------------------------------------------
+	// Setup
+	//----------------------------------------------------------------------------------
+	// Use the helper method to create the view-projection matrix
+	DirectX::XMMATRIX view_projection_matrix = CreateViewProjectionMatrix(view);
+
+	// Create the transform buffer struct, which stores the data we want to pass
+	// to the shaders
+	const_buffer_t transform_buffer;
+
+	// Store the view-projection matrix in the transform buffer struct
+	DirectX::XMStoreFloat4x4(&transform_buffer.view_projection, view_projection_matrix);
+
+	//----------------------------------------------------------------------------------
+	// Set buffers and primitive topology
+	//----------------------------------------------------------------------------------
+	UINT stride = sizeof(vertex_t);
+	UINT offset = 0;
+	// Set vertex buffer to use
+	d3d_device_context->IASetVertexBuffers(0, 1, &d3d_vertex_buffer, &stride, &offset);
+
+	// We'll also need to set the index buffer to be able to draw the triangles.
+	// As the type of an index is uint16_t, we'll use the DXGI_FORMAT_R16_UINT
+	// format
+	d3d_device_context->IASetIndexBuffer(d3d_index_buffer, DXGI_FORMAT_R16_UINT, 0);
+
+	// And finally we'll tell the renderer that we want to render a trianglelist
+	d3d_device_context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+	
+
+	//----------------------------------------------------------------------------------
+	// Draw a single cube
+	//----------------------------------------------------------------------------------
+	// Get the rotation we'll apply to the cube. Here, we'll use the xr_pose_identity we
+	// defined previously, which means the cube has "no rotation"
+	DirectX::XMVECTOR model_rotation = DirectX::XMLoadFloat4((DirectX::XMFLOAT4*) &xr_pose_identity.orientation);
+
+	// Get the translation which we'll apply to the cube. We'll also use the xr_pose_identity,
+	// which means the cube is positioned at (0, 0, 0), i.e. the origin.
+	DirectX::GXMVECTOR model_translation = DirectX::XMLoadFloat3((DirectX::XMFLOAT3*) &xr_pose_identity.position);
+
+	// Set the scaling factor of the cube. We'll scale it down by a factor of 10, i.e.
+	// we'll multiply the unit-vector by 0.1 in the affine translation
+	float scaling_factor = 0.1f;
+
+	// Setup the affine translation which we'll use for our cube
+	DirectX::XMMATRIX model_matrix = DirectX::XMMatrixAffineTransformation(DirectX::g_XMOne * scaling_factor, DirectX::g_XMZero, model_rotation, model_translation);
+
+	// Store the model matrix for our cube in the constant buffer for the shader
+	DirectX::XMStoreFloat4x4(&transform_buffer.world, DirectX::XMMatrixTranspose(model_matrix));
+
+	// Send the constant buffer to the GPU, such that the shader can use it
+	d3d_device_context->UpdateSubresource(d3d_const_buffer, 0, NULL, &transform_buffer, 0, 0);
+
+	// And now we tell the GPU to draw our vertices
+	d3d_device_context->DrawIndexed((UINT)_countof(indices), 0, 0);
 }
